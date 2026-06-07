@@ -1,0 +1,24 @@
+# Generated audiobooks — often gigabytes, not for version control
+! Output/
+
+# Input EPUBs — personal content, exclude by default
+# (remove this line if you want to commit sample EPUBs)
+! Input/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# ChromeDriver cache (webdriver-manager)
+.wdm/
+
+# OS
+.DS_Store
+Thumbs.db
+/! Input
+/! Output/Benedict, Jacka, — Fated (Alex Verus Book 1)
+/.vs
