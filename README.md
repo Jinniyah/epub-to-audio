@@ -210,7 +210,7 @@ Files are named using a sortable, library-friendly convention:
 For books in a series:
 
 ```
-Sanderson, Brandon — The Stormlight Archive #01 — The Way of Kings - 001.mp3
+Sanderson, Brandon — 001 The Stormlight Archive #01 — The Way of Kings - 001.mp3
 ```
 
 ---
