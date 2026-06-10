@@ -418,7 +418,7 @@ def apply_tags(
     author  = f"{meta['author_first']} {meta['author_last']}".strip()
     album   = meta.get("series") or meta.get("title", "")
 
-    tags.add(TIT2(encoding=3, text=f"{meta['title']} — {display}"))
+    tags.add(TIT2(encoding=3, text=f"{track_number:03} {meta['title']} — {display}"))
     tags.add(TPE1(encoding=3, text=author))
     tags.add(TALB(encoding=3, text=album))
     tags.add(TRCK(encoding=3, text=f"{track_number}/{total_tracks}"))

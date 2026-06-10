@@ -219,11 +219,16 @@ Sanderson, Brandon — The Stormlight Archive #01 — The Way of Kings - 001.mp3
 
 | Tag | Content |
 |---|---|
-| Title | `Book Title — Chapter Name` |
+| Title | `001 Book Title — Chapter Name` (3-digit zero-padded track number prefix) |
 | Artist | Author full name |
 | Album | Series name (or book title if no series) |
 | Track | `N/Total` |
 | Cover art | Extracted from EPUB, or supplied via `--cover` |
+
+The zero-padded track number prefix in the Title tag ensures tracks sort
+correctly by title in media players where only the title is visible — for
+example, when the display is too small to show the full track name.
+Tracks 1, 10, and 100 sort as `001`, `010`, and `100` rather than `1`, `10`, `100`.
 
 ---
 
