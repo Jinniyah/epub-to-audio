@@ -5,12 +5,16 @@ Usage
 -----
     python epub2audio.py book.epub
     python epub2audio.py book.epub -o ./my-audiobooks
-    python epub2audio.py book.epub --series "Dune" --series-number 1
     python epub2audio.py book.epub --headed             # show browser (good for debugging)
     python epub2audio.py book.epub --cover cover.jpg    # override cover art
     python epub2audio.py book.epub --stop-after "author's note"
     python epub2audio.py book.epub --voice af_nova      # choose TTS voice
     python epub2audio.py book.epub --list-voices        # print all available voices
+    python epub2audio.py book.epub --yes                # skip metadata confirmation prompt
+
+    # Override metadata directly (skips filename parsing for those fields):
+    python epub2audio.py book.epub --series "Dune" --series-number 1
+    python epub2audio.py book.epub --author "Herbert, Frank" --title "Dune"
 
     # Recovery — resume after an interruption:
     python epub2audio.py book.epub --start-chapter 5
@@ -53,6 +57,8 @@ from epub_utils import (
     extract_chapters,
     chunk_text,
     build_basename,
+    parse_filename_metadata,
+    confirm_metadata,
 )
 
 # ---------------------------------------------------------------------------
@@ -415,7 +421,7 @@ def apply_tags(
         tags = ID3()
 
     display = chapter_title or f"Chapter {track_number}"
-    author  = f"{meta['author_first']} {meta['author_last']}".strip()
+    author  = meta.get("author", "Unknown")
     album   = meta.get("series") or meta.get("title", "")
 
     tags.add(TIT2(encoding=3, text=f"{track_number:03} {meta['title']} — {display}"))
@@ -438,6 +444,69 @@ def apply_tags(
 
 
 # ---------------------------------------------------------------------------
+# Metadata resolution
+# ---------------------------------------------------------------------------
+
+def resolve_metadata(
+    epub_path: Path,
+    cli_author: str | None = None,
+    cli_title: str | None = None,
+    cli_series: str | None = None,
+    cli_series_number: str | None = None,
+    yes: bool = False,
+) -> dict:
+    """
+    Build the final metadata dict by layering three sources in priority order:
+
+      1. EPUB internal DC metadata  (lowest priority — always read as baseline)
+      2. Filename parse + user confirmation  (middle — fills gaps, user can fix)
+      3. CLI overrides  (highest — explicit flags always win)
+
+    Returns a dict with keys: author, title, series, series_number, cover_bytes.
+    """
+    # 1. EPUB baseline
+    meta = extract_metadata(epub_path)
+
+    # 2. Filename parse
+    filename_meta = parse_filename_metadata(epub_path)
+
+    if filename_meta is not None:
+        # Merge filename values over EPUB values (filename is more reliable for
+        # series info, and usually has the author in Last, First format already)
+        merged = {**meta, **{k: v for k, v in filename_meta.items() if v is not None}}
+        # Keep cover_bytes from EPUB — filename parse never produces one
+        merged["cover_bytes"] = meta["cover_bytes"]
+
+        confirmed = confirm_metadata(merged, source="filename", yes=yes)
+
+        if confirmed:
+            # User accepted or corrected filename parse
+            confirmed["cover_bytes"] = meta["cover_bytes"]
+            meta = confirmed
+        else:
+            # User chose S — fall back to EPUB metadata only
+            log.info("Using EPUB internal metadata only.")
+    else:
+        log.info(
+            "Filename '%s' did not match expected pattern — "
+            "using EPUB internal metadata.",
+            epub_path.name,
+        )
+
+    # 3. CLI overrides (explicit flags always win, even over user edits)
+    if cli_author        is not None:
+        meta["author"]        = cli_author
+    if cli_title         is not None:
+        meta["title"]         = cli_title
+    if cli_series        is not None:
+        meta["series"]        = cli_series
+    if cli_series_number is not None:
+        meta["series_number"] = cli_series_number
+
+    return meta
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -445,6 +514,8 @@ def process_epub(
     epub_path: Path,
     output_dir: Path,
     cover_path: Path | None = None,
+    author: str | None = None,
+    title: str | None = None,
     series: str | None = None,
     series_number: str | None = None,
     headed: bool = False,
@@ -453,10 +524,16 @@ def process_epub(
     start_chapter: int = 1,
     start_chunk: int = 1,
     voice: str = DEFAULT_VOICE,
+    yes: bool = False,
 ):
-    meta = extract_metadata(epub_path)
-    meta["series"]        = series
-    meta["series_number"] = series_number
+    meta = resolve_metadata(
+        epub_path,
+        cli_author        = author,
+        cli_title         = title,
+        cli_series        = series,
+        cli_series_number = series_number,
+        yes               = yes,
+    )
 
     chapters, _, _ = extract_chapters(epub_path, stop_after=stop_after)
     if not chapters:
@@ -467,6 +544,10 @@ def process_epub(
     book_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Book:     %s", epub_path.name)
+    log.info("Author:   %s", meta["author"])
+    log.info("Title:    %s", meta["title"])
+    if meta.get("series"):
+        log.info("Series:   %s #%s", meta["series"], meta.get("series_number", "?"))
     log.info("Output:   %s", book_dir)
     log.info("Chapters: %d", len(chapters))
     log.info("Voice:    %s", VOICES.get(voice, voice))
@@ -577,6 +658,11 @@ def main():
         description="Convert an EPUB to audiobook MP3s via Perchance TTS.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Metadata is parsed from the filename automatically and confirmed interactively
+before any audio is generated.  Use --yes to skip the confirmation prompt.
+CLI flags (--author, --title, --series, --series-number) always override both
+filename parsing and the confirmation prompt.
+
 Voice examples:
   --voice af_nova          exact voice key
   --voice nova             name substring (unambiguous)
@@ -596,10 +682,20 @@ Chapter and chunk numbers match the dry_run.py output.
                         help=f"Output root directory  (default: {DEFAULT_OUTPUT})")
     parser.add_argument("--cover",           type=Path, default=None,
                         help="Cover image (JPEG/PNG) to embed — overrides EPUB cover")
-    parser.add_argument("--series",          type=str,  default=None,
-                        help="Series name  (e.g. 'Dune')")
-    parser.add_argument("--series-number",   type=str,  default=None,
-                        help="Book number within the series  (e.g. '1')")
+
+    # Metadata overrides — all optional; filename parsing fills what's missing
+    meta_group = parser.add_argument_group("metadata overrides")
+    meta_group.add_argument("--author",          type=str, default=None,
+                        help="Author in 'Last, First' format — overrides filename parse")
+    meta_group.add_argument("--title",           type=str, default=None,
+                        help="Book title — overrides filename parse")
+    meta_group.add_argument("--series",          type=str, default=None,
+                        help="Series name  (e.g. 'Dune') — overrides filename parse")
+    meta_group.add_argument("--series-number",   type=str, default=None,
+                        help="Book number within the series  (e.g. '1') — overrides filename parse")
+    meta_group.add_argument("--yes", "-y",       action="store_true",
+                        help="Accept parsed metadata without prompting (non-interactive / scripted use)")
+
     parser.add_argument("--headed",          action="store_true",
                         help="Show the Chrome window  (recommended for first run)")
     parser.add_argument("--max-chunk",       type=int,  default=MAX_CHUNK_CHARS,
@@ -649,6 +745,8 @@ Chapter and chunk numbers match the dry_run.py output.
         epub_path     = args.epub,
         output_dir    = args.output,
         cover_path    = args.cover,
+        author        = args.author,
+        title         = args.title,
         series        = args.series,
         series_number = args.series_number,
         headed        = args.headed,
@@ -657,6 +755,7 @@ Chapter and chunk numbers match the dry_run.py output.
         start_chapter = args.start_chapter,
         start_chunk   = args.start_chunk,
         voice         = voice,
+        yes           = args.yes,
     )
 
 

@@ -16,12 +16,14 @@ no API key, no subscription, no upload to a server.
    dedications and back matter are handled automatically.
 2. Each chapter is split into chunks (≤ 4 000 characters by default) that fit within
    Perchance's generation window.
-3. Selenium drives a Chrome browser to the Perchance page, waits for the TTS model
+3. Before any audio is generated, the tool parses metadata from the input filename
+   and asks you to confirm or correct it interactively.
+4. Selenium drives a Chrome browser to the Perchance page, waits for the TTS model
    to finish loading, optionally selects a voice, then submits each chunk.
-4. The generated audio is a **browser-side blob URL** — it never touches a server.
+5. The generated audio is a **browser-side blob URL** — it never touches a server.
    The script reads it back via an async JavaScript `fetch()` call, base64-encodes it,
    and decodes it in Python.
-5. Each MP3 is saved to `! Output/<Author — Title>/` and tagged with full ID3v2.3
+6. Each MP3 is saved to `! Output/<Author — Title>/` and tagged with full ID3v2.3
    metadata (title, author, album, track number, and cover art).
 
 ---
@@ -30,7 +32,7 @@ no API key, no subscription, no upload to a server.
 
 ```
 ePub-to-Audio/
-├── epub_utils.py    # shared EPUB parsing, chunking, and filename helpers
+├── epub_utils.py    # shared EPUB parsing, chunking, filename parsing, and metadata helpers
 ├── epub2audio.py    # main pipeline — Selenium + TTS + ID3 tagging
 ├── dry_run.py       # diagnostic tool — inspect chapters without opening a browser
 ├── ! Input/         # drop .epub files here
@@ -62,32 +64,39 @@ pip install ebooklib beautifulsoup4 mutagen selenium webdriver-manager
 python dry_run.py "! Input/My Book.epub"
 ```
 
-This prints a chapter table, chunk count, estimated run time, and cover art
-status — without opening a browser or generating any audio.
+This parses metadata from the filename, asks you to confirm it, then prints a
+chapter table, chunk count, estimated run time, and cover art status — without
+opening a browser or generating any audio.
 
 ```
 ============================================================
-  DRY RUN: The Kaiju Preservation Society.epub
+  DRY RUN: Jacka, Benedict — Alex Verus #12 — Risen_cln.epub
 ============================================================
-  Title:      The Kaiju Preservation Society
-  Author:     John Scalzi
+
+  Parsed from filename:
+    [1] Author           Jacka, Benedict
+    [2] Title            Risen
+    [3] Series           Alex Verus
+    [4] Series number    12
+
+  Are these correct?
+  Press Enter to accept, a number [1-4] to correct a field,
+  or [S] to skip filename parsing and use EPUB metadata instead.
+
+  > 
+
+  Author:     Jacka, Benedict
+  Title:      Risen
+  Series:     Alex Verus  #12
   Cover art:  found in EPUB
   Chapters extracted: 30
-  Stopped after: 'Author's Note and Acknowledgments'
-
-  #     Heading                                  Chars   Chunks
-  ----- ---------------------------------------- -------  ------
-  1     Dedication                                    84       1
-  2     Chapter 1                               12,931       4
   ...
-  TOTAL TTS requests:                              129
-  Estimated run time (~90 s/chunk):              ~3 min
 ```
 
 ### 2. Run a headed test first
 
 ```bash
-python epub2audio.py "! Input/My Book.epub" --headed
+python epub2audio.py "! Input/Jacka, Benedict — Alex Verus #12 — Risen_cln.epub" --headed
 ```
 
 `--headed` keeps the Chrome window visible so you can confirm the page loads,
@@ -96,18 +105,82 @@ the voice is selected, and the first chunk generates correctly before walking aw
 ### 3. Full headless run
 
 ```bash
-python epub2audio.py "! Input/My Book.epub"
+python epub2audio.py "! Input/Jacka, Benedict — Alex Verus #12 — Risen_cln.epub"
 ```
 
-Output lands in `! Output/Scalzi, John — The Kaiju Preservation Society/`.
+Output lands in `! Output/Jacka, Benedict — Alex Verus #12 — Risen/`.
+
+---
+
+## Metadata confirmation
+
+Before any audio is generated the tool parses the input filename and shows you
+what it found:
+
+```
+  Parsed from filename:
+    [1] Author           Jacka, Benedict
+    [2] Title            Risen
+    [3] Series           Alex Verus
+    [4] Series number    12
+
+  Are these correct?
+  Press Enter to accept, a number [1-4] to correct a field,
+  or [S] to skip filename parsing and use EPUB metadata instead.
+
+  > 3
+  Series [Alex Verus]: Alex Verus Series
+```
+
+After any correction the list is redisplayed so you can verify before continuing.
+Entering **S** falls back to the EPUB's internal DC metadata.
+
+### Filename patterns recognised
+
+The parser is intentionally flexible.  All of the following work:
+
+| Filename | Author | Series | # | Title |
+|---|---|---|---|---|
+| `Jacka, Benedict — Alex Verus #12 — Risen.epub` | Jacka, Benedict | Alex Verus | 12 | Risen |
+| `Jacka, Benedict — Alex Verus 12 — Risen.epub` | Jacka, Benedict | Alex Verus | 12 | Risen |
+| `Jacka, Benedict — Alex Verus Book 12 — Risen.epub` | Jacka, Benedict | Alex Verus | 12 | Risen |
+| `AV12 - Jacka, Benedict — Alex Verus #12 — Risen_cln.epub` | Jacka, Benedict | Alex Verus | 12 | Risen |
+| `Scalzi, John — The Kaiju Preservation Society.epub` | Scalzi, John | *(none)* | *(none)* | The Kaiju Preservation Society |
+
+- Leading codes like `AV12 -` are stripped and ignored.
+- Trailing suffixes like `_cln` or `_edit` are stripped and ignored.
+- Em-dash `—`, en-dash `–`, and plain hyphen `-` are all accepted as field separators.
+- Series numbers may be prefixed with `#`, `Book`, or left bare as a trailing number.
+
+If the filename does not match any recognised pattern the tool falls back to
+EPUB internal metadata automatically.
+
+### Non-interactive / scripted use
+
+Use `--yes` (or `-y`) to accept the parsed values without prompting:
+
+```bash
+python epub2audio.py book.epub --yes
+```
+
+### Overriding individual fields
+
+CLI flags always win over filename parsing and the confirmation prompt:
+
+```bash
+python epub2audio.py book.epub --series "Alex Verus" --series-number 12
+python epub2audio.py book.epub --author "Jacka, Benedict" --title "Risen"
+```
 
 ---
 
 ## All options
 
 ```
-usage: epub2audio.py [-h] [-o OUTPUT] [--cover COVER] [--series SERIES]
-                     [--series-number N] [--headed] [--max-chunk N]
+usage: epub2audio.py [-h] [-o OUTPUT] [--cover COVER]
+                     [--author AUTHOR] [--title TITLE]
+                     [--series SERIES] [--series-number N] [--yes]
+                     [--headed] [--max-chunk N]
                      [--stop-after TEXT] [--start-chapter N] [--start-chunk N]
                      [--voice VOICE] [--list-voices]
                      epub
@@ -118,8 +191,11 @@ usage: epub2audio.py [-h] [-o OUTPUT] [--cover COVER] [--series SERIES]
 | `epub` | *(required)* | Path to the `.epub` file |
 | `-o / --output` | `! Output/` | Root directory for generated audiobooks |
 | `--cover` | *(EPUB cover)* | Override cover image (JPEG or PNG) embedded in MP3s |
-| `--series` | — | Series name, e.g. `"Dune"` |
-| `--series-number` | — | Book number within the series, e.g. `1` |
+| `--author` | *(filename/EPUB)* | Author in `Last, First` format |
+| `--title` | *(filename/EPUB)* | Book title |
+| `--series` | *(filename/EPUB)* | Series name, e.g. `"Alex Verus"` |
+| `--series-number` | *(filename/EPUB)* | Book number within the series, e.g. `12` |
+| `--yes / -y` | prompt | Accept parsed metadata without confirmation |
 | `--headed` | headless | Show the Chrome window (recommended for first run) |
 | `--max-chunk` | `4000` | Maximum characters per TTS request |
 | `--stop-after` | *(see below)* | Stop after the first chapter whose heading contains this text |
@@ -200,17 +276,20 @@ Files are named using a sortable, library-friendly convention:
 
 ```
 ! Output/
-└── Scalzi, John — The Kaiju Preservation Society/
-    ├── Scalzi, John — The Kaiju Preservation Society - 001.mp3      ← Dedication
-    ├── Scalzi, John — The Kaiju Preservation Society - 002_1.mp3    ← Chapter 1, chunk 1
-    ├── Scalzi, John — The Kaiju Preservation Society - 002_2.mp3    ← Chapter 1, chunk 2
+└── Jacka, Benedict — Alex Verus #12 — Risen/
+    ├── Jacka, Benedict — Alex Verus #12 — Risen - 001.mp3      ← Dedication
+    ├── Jacka, Benedict — Alex Verus #12 — Risen - 002_1.mp3    ← Chapter 1, chunk 1
+    ├── Jacka, Benedict — Alex Verus #12 — Risen - 002_2.mp3    ← Chapter 1, chunk 2
     ...
 ```
 
-For books in a series:
+For books without a series:
 
 ```
-Sanderson, Brandon — 001 The Stormlight Archive #01 — The Way of Kings - 001.mp3
+! Output/
+└── Scalzi, John — The Kaiju Preservation Society/
+    ├── Scalzi, John — The Kaiju Preservation Society - 001.mp3
+    ...
 ```
 
 ---
@@ -220,10 +299,13 @@ Sanderson, Brandon — 001 The Stormlight Archive #01 — The Way of Kings - 001
 | Tag | Content |
 |---|---|
 | Title | `001 Book Title — Chapter Name` (3-digit zero-padded track number prefix) |
-| Artist | Author full name |
-| Album | Series name (or book title if no series) |
+| Artist | Author in `Last, First` format (e.g. `Jacka, Benedict`) |
+| Album | Series name if present (e.g. `Alex Verus`), otherwise book title |
 | Track | `N/Total` |
 | Cover art | Extracted from EPUB, or supplied via `--cover` |
+
+Author is stored in `Last, First` format throughout — in filenames, folder names,
+and ID3 tags — so library searches and filesystem sorts all behave consistently.
 
 The zero-padded track number prefix in the Title tag ensures tracks sort
 correctly by title in media players where only the title is visible — for

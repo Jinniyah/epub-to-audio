@@ -9,6 +9,7 @@ Usage
     python dry_run.py "! Input/my_book.epub"
     python dry_run.py "! Input/my_book.epub" --stop-after "author's note"
     python dry_run.py "! Input/my_book.epub" --max-chunk 3000 --preview 500
+    python dry_run.py "! Input/my_book.epub" --yes    # skip metadata confirmation
 """
 
 import argparse
@@ -24,6 +25,8 @@ from epub_utils import (
     extract_chapters,
     chunk_text,
     extract_cover_bytes,
+    parse_filename_metadata,
+    confirm_metadata,
 )
 
 
@@ -39,6 +42,8 @@ def main():
                         help=f"Chunk size to use for estimates  (default: {MAX_CHUNK_CHARS})")
     parser.add_argument("--preview",      type=int, default=300,
                         help="Characters of first chapter to preview  (default: 300)")
+    parser.add_argument("--yes", "-y",    action="store_true",
+                        help="Accept parsed metadata without prompting")
     args = parser.parse_args()
 
     if not args.epub.exists():
@@ -55,13 +60,29 @@ def main():
     print(f"{'='*62}\n")
 
     # ------------------------------------------------------------------
-    # Metadata
+    # Metadata — filename parse + confirmation, then EPUB fallback
     # ------------------------------------------------------------------
-    meta = extract_metadata(args.epub)
-    print(f"  Title:      {meta['title']}")
-    print(f"  Author:     {meta['author_first']} {meta['author_last']}")
+    epub_meta     = extract_metadata(args.epub)
+    filename_meta = parse_filename_metadata(args.epub)
 
-    cover_status = "found in EPUB" if meta["cover_bytes"] else "NOT FOUND — use --cover"
+    if filename_meta is not None:
+        merged = {**epub_meta, **{k: v for k, v in filename_meta.items() if v is not None}}
+        merged["cover_bytes"] = epub_meta["cover_bytes"]
+        confirmed = confirm_metadata(merged, source="filename", yes=args.yes)
+        if confirmed:
+            confirmed["cover_bytes"] = epub_meta["cover_bytes"]
+            meta = confirmed
+        else:
+            meta = epub_meta
+    else:
+        meta = epub_meta
+
+    print(f"  Author:     {meta['author']}")
+    print(f"  Title:      {meta['title']}")
+    if meta.get("series"):
+        print(f"  Series:     {meta['series']}  #{meta.get('series_number', '?')}")
+
+    cover_status = "found in EPUB" if meta.get("cover_bytes") else "NOT FOUND — use --cover"
     print(f"  Cover art:  {cover_status}")
 
     # ------------------------------------------------------------------

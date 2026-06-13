@@ -121,6 +121,196 @@ def extract_cover_bytes(book) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
+# Filename metadata parsing
+# ---------------------------------------------------------------------------
+
+# Separators we'll accept between fields — em-dash, en-dash, or plain hyphen,
+# with any amount of surrounding whitespace.
+_SEP = r"\s*[—–-]\s*"
+
+# Optional leading code like "AV12 - " (letters + digits + separator)
+_PREFIX = r"(?:[A-Za-z]+\d+\s*[—–-]\s*)?"
+
+# Optional trailing suffix like "_cln" before the extension
+_SUFFIX = r"(?:_[a-zA-Z0-9]+)*"
+
+# Series number markers: "#12", "Book 12", "book12", or bare trailing digits
+_NUM_PATTERN = re.compile(
+    r"(?:#\s*(\d+)|[Bb]ook\s*(\d+))\s*$"   # explicit marker at end of series field
+)
+_BARE_TRAILING_NUM = re.compile(r"^(.*?)\s+(\d+)$")  # bare number at end of series
+
+
+def _parse_series_number(series_raw: str) -> tuple[str, str | None]:
+    """
+    Extract a series number from the raw series string.
+
+    Returns (clean_series_name, series_number_or_None).
+
+    Priority:
+      1. Explicit marker: "Alex Verus #12" or "Alex Verus Book 12"
+      2. Bare trailing number: "Alex Verus 12"
+         (accepted as best-effort; may be wrong for titles like "Catch 22")
+    """
+    m = _NUM_PATTERN.search(series_raw)
+    if m:
+        number = m.group(1) or m.group(2)
+        clean  = series_raw[: m.start()].strip()
+        return clean, number
+
+    m2 = _BARE_TRAILING_NUM.match(series_raw.strip())
+    if m2:
+        return m2.group(1).strip(), m2.group(2)
+
+    return series_raw.strip(), None
+
+
+def parse_filename_metadata(epub_path: Path) -> dict | None:
+    """
+    Attempt to extract author / title / series / series_number from the
+    EPUB filename using a flexible pattern that tolerates:
+
+      - Optional leading codes:  "AV12 - "
+      - Any dash variant as separator:  —  –  -
+      - Any amount of surrounding whitespace
+      - Optional series number markers:  #12  Book 12  12 (bare)
+      - Optional trailing suffixes:  _cln  _edit  etc.
+
+    Accepted filename shapes (after stripping the .epub extension):
+
+      Author — Title
+      Author — Series #N — Title
+      Author — Series N  — Title          (bare number)
+      Author — Series Book N — Title
+      CODE - Author — Series #N — Title   (leading code ignored)
+      ... any combination of the above with en/em/plain dashes
+
+    Returns a dict with keys:
+        author, title, series, series_number
+    or None if the filename does not match any recognised pattern.
+
+    The caller is responsible for prompting the user to confirm / correct
+    the returned values before use.
+    """
+    stem = epub_path.stem  # filename without extension
+
+    # Strip optional leading code (e.g. "AV12 - ")
+    stem = re.sub(r"^[A-Za-z]+\d+\s*[—–-]\s*", "", stem).strip()
+
+    # Strip optional trailing suffix (e.g. "_cln")
+    stem = re.sub(r"(?:_[a-zA-Z0-9]+)+$", "", stem).strip()
+
+    # Split on dash separators — we expect 1 or 2 separators
+    # giving us 2 or 3 fields: [author, title] or [author, series+num, title]
+    parts = re.split(r"\s*[—–]\s*|\s+-\s+", stem)
+
+    # Collapse any empty parts produced by double separators
+    parts = [p.strip() for p in parts if p.strip()]
+
+    if len(parts) == 2:
+        # author — title  (no series)
+        author_raw, title = parts
+        return {
+            "author":        author_raw.strip(),
+            "title":         title.strip(),
+            "series":        None,
+            "series_number": None,
+        }
+
+    if len(parts) == 3:
+        # author — series [#N] — title
+        author_raw, series_raw, title = parts
+        series_clean, series_number = _parse_series_number(series_raw)
+        return {
+            "author":        author_raw.strip(),
+            "title":         title.strip(),
+            "series":        series_clean or None,
+            "series_number": series_number,
+        }
+
+    # More than 3 parts — too ambiguous to parse safely
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Interactive metadata confirmation
+# ---------------------------------------------------------------------------
+
+FIELD_LABELS = {
+    "author":        "Author",
+    "title":         "Title",
+    "series":        "Series",
+    "series_number": "Series number",
+}
+FIELD_ORDER = ["author", "title", "series", "series_number"]
+
+
+def _display_metadata(meta: dict, source: str = "filename") -> None:
+    """Print the current metadata values in a numbered list."""
+    print(f"\n  Parsed from {source}:")
+    for i, key in enumerate(FIELD_ORDER, start=1):
+        value = meta.get(key) or "(none)"
+        print(f"    [{i}] {FIELD_LABELS[key]:<16} {value}")
+
+
+def confirm_metadata(
+    meta: dict,
+    source: str = "filename",
+    yes: bool = False,
+) -> dict:
+    """
+    Display parsed metadata and let the user confirm or correct it
+    interactively.
+
+    Parameters
+    ----------
+    meta   : dict with keys author, title, series, series_number
+    source : human-readable description of where the values came from
+    yes    : if True, skip the prompt and accept values as-is (--yes flag)
+
+    Returns the (possibly corrected) metadata dict.
+    """
+    if yes:
+        _display_metadata(meta, source)
+        print("  (--yes) Accepting parsed values automatically.\n")
+        return meta
+
+    while True:
+        _display_metadata(meta, source)
+        print()
+        print("  Are these correct?")
+        print("  Press Enter to accept, a number [1-4] to correct a field,")
+        print("  or [S] to skip filename parsing and use EPUB metadata instead.")
+        print()
+
+        raw = input("  > ").strip()
+
+        if raw == "":
+            # Accept as-is
+            print()
+            return meta
+
+        if raw.upper() == "S":
+            print("  Skipping filename parse — will use EPUB internal metadata.\n")
+            return {}           # empty dict signals "skip"
+
+        if raw in ("1", "2", "3", "4"):
+            key = FIELD_ORDER[int(raw) - 1]
+            current = meta.get(key) or ""
+            prompt  = f"  {FIELD_LABELS[key]}"
+            if current:
+                prompt += f" [{current}]"
+            prompt += ": "
+            new_val = input(prompt).strip()
+            if new_val:
+                meta[key] = new_val if new_val.lower() not in ("none", "-", "") else None
+            # Loop back to display updated values
+            continue
+
+        print("  Please enter a number 1–4, S, or press Enter.\n")
+
+
+# ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
@@ -130,11 +320,10 @@ def extract_metadata(epub_path: Path) -> dict:
 
     Keys
     ----
+    author        : str  — "Last, First" format
     title         : str
-    author_first  : str
-    author_last   : str
-    series        : None  (populated later via CLI --series)
-    series_number : None  (populated later via CLI --series-number)
+    series        : None  (populated later via filename parse or CLI)
+    series_number : None  (populated later via filename parse or CLI)
     cover_bytes   : bytes | None
     """
     book = epub.read_epub(str(epub_path))
@@ -146,18 +335,21 @@ def extract_metadata(epub_path: Path) -> dict:
     title       = dc("title")   or "Unknown Title"
     author_full = dc("creator") or "Unknown Author"
 
-    parts = author_full.split()
-    if len(parts) >= 2:
-        author_first = " ".join(parts[:-1])
-        author_last  = parts[-1]
+    # Normalise to "Last, First" format.
+    # If the EPUB already stores "Last, First" (contains a comma) keep it.
+    # Otherwise reverse "First Last" → "Last, First".
+    if "," in author_full:
+        author = author_full.strip()
     else:
-        author_first = author_full
-        author_last  = ""
+        parts = author_full.split()
+        if len(parts) >= 2:
+            author = f"{parts[-1]}, {' '.join(parts[:-1])}"
+        else:
+            author = author_full
 
     return {
+        "author":        author.strip(),
         "title":         title,
-        "author_first":  author_first.strip(),
-        "author_last":   author_last.strip(),
         "series":        None,
         "series_number": None,
         "cover_bytes":   extract_cover_bytes(book),
@@ -296,9 +488,8 @@ def build_basename(meta: dict) -> str:
     Format (no series):  "Last, First — Title"
     Format (series):     "Last, First — Series #NN — Title"
     """
-    author_last   = sanitize(meta.get("author_last",   ""))
-    author_first  = sanitize(meta.get("author_first",  ""))
-    title         = sanitize(meta.get("title",         "Unknown"))
+    author        = sanitize(meta.get("author", "Unknown"))
+    title         = sanitize(meta.get("title",  "Unknown"))
     series        = meta.get("series")
     series_number = meta.get("series_number")
 
@@ -311,5 +502,5 @@ def build_basename(meta: dict) -> str:
             pass
 
     if series:
-        return f"{author_last}, {author_first} — {sanitize(series)} #{series_number} — {title}"
-    return f"{author_last}, {author_first} — {title}"
+        return f"{author} — {sanitize(series)} #{series_number} — {title}"
+    return f"{author} — {title}"
